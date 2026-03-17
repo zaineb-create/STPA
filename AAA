@@ -1,0 +1,91 @@
+import pandas as pd
+import io
+from office365.runtime.auth.user_credential import UserCredential
+from office365.sharepoint.client_context import ClientContext
+
+# --- 1. CONFIGURATION DES ACCÈS ---
+SITE_URL = "https://roseblanchetn.sharepoint.com/sites/SDAHSESTPA"
+# Chemin relatif vers votre fichier (à vérifier dans SharePoint)
+FILE_RELATIVE_URL = "/sites/SDAHSESTPA/Documents Partages/Labo/2025 CQ SBOULA FOCQT01_02.xlsx"
+
+# Identifiants (Utilisez des variables d'environnement en production)
+USERNAME = "votre.email@roseblanche.com.tn"
+PASSWORD = "votre_mot_de_passe"
+
+def get_sharepoint_context():
+    """Initialise la connexion à SharePoint"""
+    return ClientContext(SITE_URL).with_credentials(UserCredential(USERNAME, PASSWORD))
+
+def analyser_donnees_ssse():
+    print("Connexion à SharePoint...")
+    ctx = get_sharepoint_context()
+    
+    # --- 2. RÉCUPÉRATION DU FICHIER ---
+    try:
+        response = ctx.web.get_file_by_server_relative_url(FILE_RELATIVE_URL).download().execute_query()
+        file_content = io.BytesIO(response.content)
+        df = pd.read_excel(file_content, sheet_name='Semoule SSSE')
+        print("Fichier chargé avec succès.")
+    except Exception as e:
+        print(f"Erreur de lecture : {e}")
+        return
+
+    # --- 3. NETTOYAGE DES DONNÉES ---
+    # Conversion de la date
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    
+    # Nettoyage des colonnes numériques (suppression des textes parasites)
+    cols_a_nettoyer = [
+        'Humidité (%)', 'Protéine (%)/MS', 'Gluten Index', 
+        'Col. b', 'Cendres (%) (+/- 0,02)', '∑ 355; 250'
+    ]
+    for col in cols_a_nettoyer:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Suppression des lignes vides critiques
+    df = df.dropna(subset=['Date', 'Humidité (%)'])
+
+    # --- 4. LOGIQUE DE CONFORMITÉ (NQA) ---
+    def verifier_nqa(row):
+        conditions = {
+            "Humidité": 13 <= row['Humidité (%)'] <= 14.5,
+            "Protéine": row['Protéine (%)/MS'] > 12 if pd.notnull(row['Protéine (%)/MS']) else True,
+            "Gluten_Index": 65 <= row['Gluten Index'] <= 90 if pd.notnull(row['Gluten Index']) else True,
+            "Couleur_b": row['Col. b'] > 18 if pd.notnull(row['Col. b']) else True,
+            "Cendres": row['Cendres (%) (+/- 0,02)'] < 1.0 if pd.notnull(row['Cendres (%) (+/- 0,02)']) else True,
+            "Granulométrie": row['∑ 355; 250'] > 40 if pd.notnull(row['∑ 355; 250']) else True
+        }
+        # Retourne 1 si tout est conforme, 0 sinon
+        return 1 if all(conditions.values()) else 0
+
+    df['Est_Conforme'] = df.apply(verifier_nqa, axis=1)
+
+    # --- 5. CALCUL DES INDICATEURS (KPI) ---
+    # On prend les données des 30 derniers jours
+    recent_df = df[df['Date'] >= (df['Date'].max() - pd.Timedelta(days=30))]
+    
+    kpi = {
+        'Dernière Analyse': [df['Date'].max().strftime('%d/%m/%Y')],
+        'Taux Conformité (%)': [round(recent_df['Est_Conforme'].mean() * 100, 2)],
+        'Moyenne Humidité': [round(recent_df['Humidité (%)'].mean(), 2)],
+        'Statut Global': ["CONFORME" if recent_df['Est_Conforme'].mean() > 0.85 else "ALERTE"]
+    }
+    
+    df_kpi = pd.DataFrame(kpi)
+    print("KPI calculés.")
+
+    # --- 6. RÉÉCRITURE DES RÉSULTATS SUR SHAREPOINT ---
+    output_buffer = io.BytesIO()
+    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+        df_kpi.to_excel(writer, index=False, sheet_name='KPI_Resultats')
+    
+    # Téléversement du fichier de sortie
+    target_folder = ctx.web.get_folder_by_server_relative_url("/sites/SDAHSESTPA/Documents Partages/Labo")
+    target_folder.upload_file("KPI_SSSE_Automated.xlsx", output_buffer.getvalue()).execute_query()
+    
+    print("Traitement terminé. Le fichier KPI_SSSE_Automated.xlsx a été mis à jour sur SharePoint.")
+
+# Exécution
+if __name__ == "__main__":
+    analyser_donnees_ssse()
