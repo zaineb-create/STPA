@@ -1,25 +1,14 @@
 """
 Dashboard Qualité — Semoule SSSE
 =================================
-CONNEXION : Device Login Microsoft (ton propre compte)
-→ Aucun admin requis
-→ Aucun secret à configurer
-→ Fonctionne avec tout compte Microsoft 365
+SANS admin · SANS permissions Graph API
+Lecture directe via URL SharePoint + token Device Login
 
 Prérequis :
-    pip install msal pandas openpyxl plotly requests python-dotenv
-
-Utilisation :
-    python generate_dashboard_ssse_devicelogin.py
-
-    → Le script affiche un code dans le terminal
-    → Tu vas sur https://microsoft.com/devicelogin
-    → Tu entres le code
-    → Tu te connectes avec ton compte entreprise
-    → Le script continue automatiquement
+    pip install msal pandas openpyxl plotly requests python-dotenv jinja2
 """
 
-import io, os, json, sys, webbrowser
+import io, os, json, webbrowser
 from datetime import datetime
 
 try:
@@ -32,29 +21,31 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
-from jinja2 import Template
 import msal
 
 # ============================================================
-#  CONFIG — seules ces valeurs sont à adapter
+#  CONFIG
 # ============================================================
 
-# URL de ton site SharePoint
 SP_SITE      = "roseblanchetn.sharepoint.com"
 SP_SITE_PATH = "/sites/SDAHSESTPA"
+SP_BASE_URL  = "https://roseblanchetn.sharepoint.com"
 
-# Chemin du fichier Excel dans SharePoint
-EXCEL_PATH   = os.getenv("EXCEL_PATH",
-               "Documents/Collaboratif -SBOULA-/Contrôle Qualité -CQT-/Controle qualité -SBOULA-/2025 CQ SBOULA/2025 CQ SBOULA FOCQT01_02.xlsx")
+# UniqueId du fichier Excel (extrait de ton lien SharePoint)
+FILE_UNIQUE_ID = "0761FA65-3D84-4B10-B009-8CA5BF050C98"
+
 SHEET_NAME   = "Semoule SSSE"
 OUTPUT_HTML  = "dashboard_ssse.html"
 
-# Client ID public Microsoft (Graph Explorer — utilisable par tous, pas besoin d'admin)
-# C'est l'ID officiel de l'application "Microsoft Azure CLI" — public et gratuit
-CLIENT_ID    = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+# Client ID Microsoft Graph Command Line Tools
+CLIENT_ID    = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 AUTHORITY    = "https://login.microsoftonline.com/organizations"
-SCOPES       = ["https://graph.microsoft.com/Sites.Read.All",
-                "https://graph.microsoft.com/Files.ReadWrite.All"]
+
+# Scopes SharePoint directs — pas besoin d'approbation admin
+SCOPES = [
+    f"https://{SP_SITE}/AllSites.Read",
+    f"https://{SP_SITE}/MyFiles.Read"
+]
 
 # Colonnes SSSE
 COL_DATE     = "Date"
@@ -66,8 +57,9 @@ COL_FLUX     = "Flux_Statut"
 COL_ECHANT   = "N° de l'échantillon"
 
 MOIS_FR = {
-    1:"Janvier",2:"Février",3:"Mars",4:"Avril",5:"Mai",6:"Juin",
-    7:"Juillet",8:"Août",9:"Septembre",10:"Octobre",11:"Novembre",12:"Décembre"
+    1:"Janvier", 2:"Février", 3:"Mars", 4:"Avril",
+    5:"Mai", 6:"Juin", 7:"Juillet", 8:"Août",
+    9:"Septembre", 10:"Octobre", 11:"Novembre", 12:"Décembre"
 }
 
 # ============================================================
@@ -75,20 +67,11 @@ MOIS_FR = {
 # ============================================================
 
 def get_token() -> str:
-    """
-    Ouvre un flux Device Login :
-    1. Affiche un code dans le terminal
-    2. Tu vas sur https://microsoft.com/devicelogin
-    3. Tu entres le code et tu te connectes
-    4. Le script récupère le token automatiquement
-    Token mis en cache → pas besoin de se reconnecter à chaque exécution
-    """
-    cache = msal.SerializableTokenCache()
+    cache      = msal.SerializableTokenCache()
     cache_file = ".token_cache.json"
 
-    # Charger le cache existant si disponible
     if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
+        with open(cache_file) as f:
             cache.deserialize(f.read())
 
     app = msal.PublicClientApplication(
@@ -97,7 +80,7 @@ def get_token() -> str:
         token_cache=cache
     )
 
-    # Essayer d'utiliser un token en cache d'abord
+    # Essayer le cache d'abord
     accounts = app.get_accounts()
     if accounts:
         print(f"  Compte en cache : {accounts[0]['username']}")
@@ -107,35 +90,32 @@ def get_token() -> str:
             _save_cache(cache, cache_file)
             return result["access_token"]
 
-    # Sinon, lancer le Device Login
+    # Device Login
     flow = app.initiate_device_flow(scopes=SCOPES)
-
     if "user_code" not in flow:
         raise Exception(f"Erreur Device Login : {flow}")
 
     print("\n" + "="*55)
     print("  CONNEXION REQUISE")
     print("="*55)
-    print(f"\n  1. Ouvre cette URL dans ton navigateur :")
-    print(f"     https://microsoft.com/devicelogin")
-    print(f"\n  2. Entre ce code : {flow['user_code']}")
-    print(f"\n  3. Connecte-toi avec ton compte Microsoft entreprise")
-    print(f"\n  En attente de ta connexion...")
-    print("="*55 + "\n")
+    print(f"\n  1. Ouvre : https://microsoft.com/devicelogin")
+    print(f"  2. Entre le code : {flow['user_code']}")
+    print(f"  3. Connecte-toi avec ton compte rose-blanche.com")
+    print(f"\n  En attente...\n")
 
-    # Ouvrir automatiquement le navigateur
     try:
         webbrowser.open("https://microsoft.com/devicelogin")
     except Exception:
         pass
 
-    # Attendre la connexion (timeout 5 min)
     result = app.acquire_token_by_device_flow(flow)
 
     if "access_token" not in result:
-        raise Exception(f"Connexion échouée : {result.get('error_description', result)}")
+        raise Exception(
+            f"Connexion échouée : {result.get('error_description', result)}"
+        )
 
-    print(f"  Connecté avec succès !")
+    print("  Connecté avec succès !")
     _save_cache(cache, cache_file)
     return result["access_token"]
 
@@ -147,32 +127,53 @@ def _save_cache(cache, path):
 
 
 # ============================================================
-#  ETAPE 2 — Lecture Excel depuis SharePoint via Graph API
+#  ETAPE 2 — Lecture Excel via URL directe SharePoint
 # ============================================================
 
 def read_excel(token: str) -> pd.DataFrame:
-    headers = {"Authorization": f"Bearer {token}"}
+    """
+    Lecture via l'UniqueId du fichier — URL SharePoint directe.
+    Utilise le token SharePoint (pas Graph API) → évite le 403.
+    """
+    print(f"  Téléchargement du fichier Excel...")
 
-    # Récupérer l'ID du site
-    site_url = (
-        f"https://graph.microsoft.com/v1.0/sites/"
-        f"{SP_SITE}:{SP_SITE_PATH}"
+    download_url = (
+        f"{SP_BASE_URL}/sites/SDAHSESTPA"
+        f"/_layouts/15/download.aspx"
+        f"?UniqueId={FILE_UNIQUE_ID}"
     )
-    site_resp = requests.get(site_url, headers=headers)
-    site_resp.raise_for_status()
-    site_id = site_resp.json()["id"]
-    print(f"  Site ID trouvé : {site_id.split(',')[1]}")
 
-    # Télécharger le fichier Excel
-    file_url = (
-        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
-        f"/drive/root:/{EXCEL_PATH}:/content"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "*/*",
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    resp = requests.get(
+        download_url,
+        headers=headers,
+        timeout=60,
+        allow_redirects=True
     )
-    file_resp = requests.get(file_url, headers=headers)
-    file_resp.raise_for_status()
 
-    df = pd.read_excel(io.BytesIO(file_resp.content),
-                       sheet_name=SHEET_NAME, header=0)
+    # Vérifier que c'est bien un fichier Excel et non une page HTML
+    if resp.status_code != 200:
+        raise Exception(
+            f"Erreur HTTP {resp.status_code}\n"
+            f"→ Supprime .token_cache.json et relance le script"
+        )
+
+    if b"<!DOCTYPE" in resp.content[:200] or b"<html" in resp.content[:200].lower():
+        raise Exception(
+            "Reçu une page HTML au lieu du fichier Excel.\n"
+            "→ Supprime .token_cache.json et relance le script"
+        )
+
+    df = pd.read_excel(
+        io.BytesIO(resp.content),
+        sheet_name=SHEET_NAME,
+        header=0
+    )
     print(f"  {len(df)} lignes lues — feuille '{SHEET_NAME}'")
     return df
 
@@ -299,14 +300,14 @@ tbody td{padding:8px 12px;color:#c8dff0;vertical-align:middle}
   <span class="filter-info" id="filter-info"></span>
 </div>
 <div class="kpi-row">
-  <div class="kpi c-blue"><div class="lbl">Total analyses</div><div class="val" id="k-total">—</div><div class="sub">Feuille Semoule SSSE</div></div>
+  <div class="kpi c-blue"><div class="lbl">Total analyses</div><div class="val" id="k-total">—</div><div class="sub">Semoule SSSE</div></div>
   <div class="kpi c-red"><div class="lbl">Anomalies</div><div class="val" id="k-anom">—</div><div class="sub" id="k-anom-sub">—</div></div>
   <div class="kpi c-amber"><div class="lbl">Taux anomalies</div><div class="val" id="k-taux">—</div><div class="sub">sur total analyses</div></div>
   <div class="kpi c-green"><div class="lbl">Notifiées (Oui)</div><div class="val" id="k-notif">—</div><div class="sub" id="k-notif-sub">—</div></div>
   <div class="kpi c-purple"><div class="lbl">Problème dominant</div><div class="val" id="k-top" style="font-size:13px;margin-top:6px;line-height:1.4">—</div></div>
 </div>
 <div class="grid">
-  <div class="card"><div class="card-title">Anomalies par type de problème</div><div id="ch-type"></div></div>
+  <div class="card"><div class="card-title">Anomalies par type</div><div id="ch-type"></div></div>
   <div class="card"><div class="card-title">Répartition par étape</div><div id="ch-etape"></div></div>
   <div class="card wide"><div class="card-title">Évolution mensuelle</div><div id="ch-trend"></div></div>
   <div class="card wide">
@@ -345,7 +346,7 @@ function getFiltered(){
 function render(){
   const fd=getFiltered();const n=fd.length;
   const isF=n<ALL_DATA.length;
-  document.getElementById('filter-info').textContent=isF?`Filtre : ${n} / ${ALL_DATA.length} anomalies`:'';
+  document.getElementById('filter-info').textContent=isF?`Filtre : ${n} / ${ALL_DATA.length}`:'';
   document.getElementById('k-total').textContent=TOTAL_ANALYSES.toLocaleString('fr');
   document.getElementById('k-anom').textContent=n.toLocaleString('fr');
   document.getElementById('k-anom-sub').textContent=isF?`(total:${ALL_DATA.length})`:'période complète';
@@ -390,40 +391,21 @@ populateFilters();render();
 
 
 def generate_html(payload: dict) -> str:
-    return DASHBOARD_HTML.replace("__DATA_JSON__", json.dumps(payload, ensure_ascii=False))
+    return DASHBOARD_HTML.replace(
+        "__DATA_JSON__",
+        json.dumps(payload, ensure_ascii=False)
+    )
 
 
 # ============================================================
-#  ETAPE 6 — Upload HTML sur SharePoint
+#  ETAPE 6 — Sauvegarde locale du HTML
 # ============================================================
 
-def upload_html(token: str, html: str) -> str:
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # Récupérer l'ID du site
-    site_resp = requests.get(
-        f"https://graph.microsoft.com/v1.0/sites/{SP_SITE}:{SP_SITE_PATH}",
-        headers=headers
-    )
-    site_resp.raise_for_status()
-    site_id = site_resp.json()["id"]
-
-    # Dossier cible = même dossier que l'Excel
-    folder = "/".join(EXCEL_PATH.split("/")[:-1])
-    upload_url = (
-        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
-        f"/drive/root:/{folder}/{OUTPUT_HTML}:/content"
-    )
-    up = requests.put(
-        upload_url,
-        headers={**headers, "Content-Type": "text/html"},
-        data=html.encode("utf-8")
-    )
-    up.raise_for_status()
-
-    web_url = up.json().get("webUrl", "")
-    print(f"  Uploadé : {web_url}")
-    return web_url
+def save_html(html: str) -> str:
+    with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  Fichier créé : {OUTPUT_HTML}")
+    return OUTPUT_HTML
 
 
 # ============================================================
@@ -432,10 +414,10 @@ def upload_html(token: str, html: str) -> str:
 
 if __name__ == "__main__":
     print("\n" + "="*55)
-    print("  Dashboard Qualité SSSE — Device Login")
+    print("  Dashboard Qualité SSSE")
     print("="*55 + "\n")
 
-    print("[1/5] Authentification Microsoft (Device Login)...")
+    print("[1/5] Authentification Microsoft...")
     token = get_token()
 
     print("\n[2/5] Lecture fichier Excel SharePoint...")
@@ -449,8 +431,8 @@ if __name__ == "__main__":
     html    = generate_html(payload)
     print(f"  Taille : {len(html)//1024} Ko")
 
-    print("\n[5/5] Upload sur SharePoint...")
-    url = upload_html(token, html)
+    print("\n[5/5] Sauvegarde...")
+    path = save_html(html)
 
     print("\n" + "="*55)
     print("  TERMINÉ !")
@@ -458,6 +440,10 @@ if __name__ == "__main__":
     print(f"\n  Anomalies : {payload['total_anomalies']}")
     print(f"  Analyses  : {payload['total_analyses']}")
     print(f"  Généré le : {payload['generated_at']}")
-    print(f"\n  URL Power Apps → Web viewer :")
-    print(f'  "{url}"')
+    print(f"\n  Fichier   : {path}")
+    print(f"\n  Prochaines étapes :")
+    print(f"  1. Télécharge {OUTPUT_HTML} depuis Codespaces")
+    print(f"     (clic droit sur le fichier → Download)")
+    print(f"  2. Dépose-le dans ton dossier SharePoint")
+    print(f"  3. Copie l'URL → Power Apps → Web viewer")
     print()
