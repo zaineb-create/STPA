@@ -232,7 +232,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="frame-ancestors *;">
 <title>Dashboard Qualité — SSSE</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
