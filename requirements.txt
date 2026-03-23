@@ -1,8 +1,2 @@
 flask
 gunicorn
-msal
-pandas
-openpyxl
-requests
-python-dotenv
- 
