@@ -1,0 +1,384 @@
+with open("generate_dashboard_devicelogin.py", "r") as f:
+    content = f.read()
+
+# Remplacer les imports - ajouter openpyxl
+old_imports = "import requests\nimport pandas as pd\nimport plotly.graph_objects as go\nimport plotly.io as pio\nimport msal"
+new_imports = "import requests\nimport pandas as pd\nfrom openpyxl import Workbook\nfrom openpyxl.styles import PatternFill, Font, Alignment, Border, Side\nfrom openpyxl.utils import get_column_letter\nfrom openpyxl.chart import BarChart, PieChart, Reference\nimport msal"
+content = content.replace(old_imports, new_imports)
+
+# Remplacer OUTPUT_HTML par OUTPUT_EXCEL
+content = content.replace('OUTPUT_HTML  = "dashboard_ssse.html"', 'OUTPUT_EXCEL = "anomalies_ssse.xlsx"')
+
+# Remplacer la fonction serialize + generate_html + save_html + upload par generate_excel
+old_block = '''# ============================================================
+#  ETAPE 4 — Sérialisation JSON
+# ============================================================
+
+def serialize(df_all, df_anom) -> dict:
+    rows = []
+    for _, r in df_anom.iterrows():
+        rows.append({
+            "date"    : str(r["Jour"]),
+            "annee"   : str(r["Année"]),
+            "mois_num": int(r["Mois_num"]) if pd.notna(r["Mois_num"]) else 0,
+            "mois_nom": MOIS_FR.get(int(r["Mois_num"]), "") if pd.notna(r["Mois_num"]) else "",
+            "probleme": str(r[COL_PROBLEME]),
+            "etape"   : str(r[COL_ETAPE]),
+            "lot"     : str(r[COL_LOT])    if pd.notna(r[COL_LOT])    else "",
+            "echant"  : str(r[COL_ECHANT]) if pd.notna(r[COL_ECHANT]) else "",
+            "notif"   : str(r[COL_NOTIF])  if pd.notna(r[COL_NOTIF])  else "Non",
+            "flux"    : str(r[COL_FLUX])   if pd.notna(r[COL_FLUX])   else "",
+        })
+    return {
+        "total_analyses" : len(df_all),
+        "total_anomalies": len(df_anom),
+        "generated_at"   : datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "data"           : rows
+    }'''
+
+new_block = '''# ============================================================
+#  ETAPE 4 — Génération Excel structuré pour Power BI
+# ============================================================
+
+def generate_excel(df_all: pd.DataFrame, df_anom: pd.DataFrame) -> str:
+    """
+    Génère un fichier Excel structuré avec 4 feuilles :
+    1. Anomalies_Detail   — toutes les anomalies ligne par ligne
+    2. Resume_Mensuel     — comptage par mois
+    3. Resume_Type        — comptage par type de problème
+    4. Resume_Etape       — comptage par étape
+    """
+    wb = Workbook()
+
+    # ---- Styles ----
+    HEADER_FILL   = PatternFill("solid", fgColor="1E3A5F")
+    HEADER_FONT   = Font(color="FFFFFF", bold=True, size=11)
+    HEADER_ALIGN  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    RED_FILL      = PatternFill("solid", fgColor="FDECEA")
+    AMBER_FILL    = PatternFill("solid", fgColor="FFF8E1")
+    GREEN_FILL    = PatternFill("solid", fgColor="E8F5E9")
+    ALT_FILL      = PatternFill("solid", fgColor="F0F4FA")
+    BORDER = Border(
+        left=Side(style="thin", color="D0D0D0"),
+        right=Side(style="thin", color="D0D0D0"),
+        top=Side(style="thin", color="D0D0D0"),
+        bottom=Side(style="thin", color="D0D0D0")
+    )
+
+    PROB_COLORS = {
+        "PIQUAGE BRUN"        : "FDECEA",
+        "PIQUAGE NOIR"        : "EDE7F6",
+        "GRANULOMETRIE"       : "FFF8E1",
+        "COULEUR"             : "E3F2FD",
+        "TENEUR EN EAU ELEVEE": "E8F5E9",
+        "TENEUR EN EAU FAIBLE": "E8F5E9",
+        "MELANGE PRODUITS"    : "FFF3E0",
+        "CHARANCONS"          : "FDECEA",
+        "RHEOLOGIE"           : "F5F5F5",
+    }
+
+    def style_header(ws, row, cols):
+        for col in range(1, cols + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.fill   = HEADER_FILL
+            cell.font   = HEADER_FONT
+            cell.alignment = HEADER_ALIGN
+            cell.border = BORDER
+
+    def style_row(ws, row, cols, fill=None):
+        for col in range(1, cols + 1):
+            cell = ws.cell(row=row, column=col)
+            if fill:
+                cell.fill = PatternFill("solid", fgColor=fill)
+            cell.border = BORDER
+            cell.alignment = Alignment(vertical="center")
+
+    def set_col_widths(ws, widths):
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    # =====================================================
+    #  FEUILLE 1 — Anomalies_Detail
+    # =====================================================
+    ws1 = wb.active
+    ws1.title = "Anomalies_Detail"
+    ws1.freeze_panes = "A2"
+    ws1.row_dimensions[1].height = 35
+
+    headers1 = [
+        "Date", "Année", "Mois", "Semaine",
+        "N° Lot", "N° Échantillon", "Étape",
+        "Problème", "Notifié", "Flux Statut",
+        "Humidité (%)", "AW", "Protéine Brut (%)",
+        "Gluten Humide", "Gluten Index", "Gluten Sec",
+        "Piqûre Noir", "Piqûre Brun", "Cendres (%)",
+        "T Chute", "Commentaires"
+    ]
+    ws1.append(headers1)
+    style_header(ws1, 1, len(headers1))
+
+    for i, (_, r) in enumerate(df_anom.iterrows(), 2):
+        date_val = r[COL_DATE] if pd.notna(r[COL_DATE]) else None
+        row_data = [
+            date_val,
+            r["Année"] if pd.notna(r.get("Année", None)) else "",
+            int(r["Mois_num"]) if pd.notna(r.get("Mois_num", None)) else "",
+            date_val.isocalendar()[1] if date_val else "",
+            str(r[COL_LOT])    if pd.notna(r[COL_LOT])    else "",
+            str(r[COL_ECHANT]) if pd.notna(r[COL_ECHANT]) else "",
+            str(r[COL_ETAPE]),
+            str(r[COL_PROBLEME]),
+            str(r[COL_NOTIF])  if pd.notna(r[COL_NOTIF])  else "Non",
+            str(r[COL_FLUX])   if pd.notna(r[COL_FLUX])   else "",
+            round(float(r["Humidité (%)"]), 2)         if pd.notna(r.get("Humidité (%)"))         else "",
+            round(float(r["AW"]), 3)                   if pd.notna(r.get("AW"))                   else "",
+            round(float(r["Protéine Brut (%) (+/-0,7)"]), 2) if pd.notna(r.get("Protéine Brut (%) (+/-0,7)")) else "",
+            round(float(r["Gluten Humide"]), 1)        if pd.notna(r.get("Gluten Humide"))        else "",
+            round(float(r["Gluten Index"]), 1)         if pd.notna(r.get("Gluten Index"))         else "",
+            round(float(r["Gluten Sec                            "]), 1) if pd.notna(r.get("Gluten Sec                            ")) else "",
+            round(float(r["Piqûre Noir"]), 1)          if pd.notna(r.get("Piqûre Noir"))          else "",
+            round(float(r["Piqûre Brun"]), 1)          if pd.notna(r.get("Piqûre Brun"))          else "",
+            round(float(r["Cendres (%) (+/- 0,02)"]), 3) if pd.notna(r.get("Cendres (%) (+/- 0,02)")) else "",
+            round(float(r["T Chute"]), 0)              if pd.notna(r.get("T Chute"))              else "",
+            str(r["Commentaires"]) if pd.notna(r.get("Commentaires")) else "",
+        ]
+        ws1.append(row_data)
+        prob = str(r[COL_PROBLEME])
+        fill_color = PROB_COLORS.get(prob, "FFFFFF")
+        style_row(ws1, i, len(headers1), fill=fill_color if i % 2 == 0 else None)
+        # Formater la date
+        if date_val:
+            ws1.cell(row=i, column=1).number_format = "DD/MM/YYYY"
+
+    set_col_widths(ws1, [14,8,7,9,10,16,14,22,10,12,12,8,15,13,12,11,12,12,12,10,30])
+
+    # =====================================================
+    #  FEUILLE 2 — Resume_Mensuel
+    # =====================================================
+    ws2 = wb.create_sheet("Resume_Mensuel")
+    ws2.freeze_panes = "A2"
+    ws2.row_dimensions[1].height = 35
+
+    MOIS_NOMS = {1:"Janvier",2:"Février",3:"Mars",4:"Avril",5:"Mai",6:"Juin",
+                 7:"Juillet",8:"Août",9:"Septembre",10:"Octobre",11:"Novembre",12:"Décembre"}
+
+    df_anom2 = df_anom.copy()
+    df_anom2["Mois_num2"] = df_anom2[COL_DATE].dt.month
+    df_anom2["Année2"]    = df_anom2[COL_DATE].dt.year
+
+    mensuel = df_anom2.groupby(["Année2","Mois_num2"]).agg(
+        Nb_Anomalies=("Probléme","count"),
+        Nb_Notifiees=(COL_NOTIF, lambda x: (x=="Oui").sum()),
+        Types_Distincts=("Probléme","nunique")
+    ).reset_index().sort_values(["Année2","Mois_num2"])
+
+    headers2 = ["Année","Mois Num","Mois","Nb Anomalies","Nb Notifiées","Types Distincts","Taux Notification (%)"]
+    ws2.append(headers2)
+    style_header(ws2, 1, len(headers2))
+
+    for i, (_, r) in enumerate(mensuel.iterrows(), 2):
+        taux = round(r["Nb_Notifiees"] / r["Nb_Anomalies"] * 100, 1) if r["Nb_Anomalies"] > 0 else 0
+        ws2.append([
+            int(r["Année2"]),
+            int(r["Mois_num2"]),
+            MOIS_NOMS.get(int(r["Mois_num2"]), ""),
+            int(r["Nb_Anomalies"]),
+            int(r["Nb_Notifiees"]),
+            int(r["Types_Distincts"]),
+            taux
+        ])
+        fill = ALT_FILL if i % 2 == 0 else None
+        style_row(ws2, i, len(headers2), fill="F0F4FA" if i % 2 == 0 else None)
+
+    set_col_widths(ws2, [10, 10, 14, 16, 16, 16, 22])
+
+    # Graphique barres mensuel
+    chart2 = BarChart()
+    chart2.type = "col"
+    chart2.title = "Anomalies par mois"
+    chart2.y_axis.title = "Nb Anomalies"
+    chart2.x_axis.title = "Mois"
+    data2  = Reference(ws2, min_col=4, min_row=1, max_row=mensuel.shape[0]+1)
+    cats2  = Reference(ws2, min_col=3, min_row=2, max_row=mensuel.shape[0]+1)
+    chart2.add_data(data2, titles_from_data=True)
+    chart2.set_categories(cats2)
+    chart2.shape = 4
+    chart2.width = 20
+    chart2.height = 12
+    ws2.add_chart(chart2, "I2")
+
+    # =====================================================
+    #  FEUILLE 3 — Resume_Type
+    # =====================================================
+    ws3 = wb.create_sheet("Resume_Type")
+    ws3.row_dimensions[1].height = 35
+
+    type_grp = df_anom.groupby(COL_PROBLEME).agg(
+        Nb_Anomalies=("Probléme","count"),
+        Nb_Notifiees=(COL_NOTIF, lambda x: (x=="Oui").sum()),
+        Etapes_Concernees=(COL_ETAPE,"nunique")
+    ).reset_index().sort_values("Nb_Anomalies", ascending=False)
+
+    total_anom = len(df_anom)
+    headers3 = ["Type de Problème","Nb Anomalies","% du Total","Nb Notifiées","Taux Notification (%)","Étapes Concernées"]
+    ws3.append(headers3)
+    style_header(ws3, 1, len(headers3))
+
+    for i, (_, r) in enumerate(type_grp.iterrows(), 2):
+        pct   = round(r["Nb_Anomalies"] / total_anom * 100, 1)
+        taux  = round(r["Nb_Notifiees"] / r["Nb_Anomalies"] * 100, 1)
+        ws3.append([
+            str(r[COL_PROBLEME]),
+            int(r["Nb_Anomalies"]),
+            pct,
+            int(r["Nb_Notifiees"]),
+            taux,
+            int(r["Etapes_Concernees"])
+        ])
+        prob = str(r[COL_PROBLEME])
+        fill = PROB_COLORS.get(prob, "F0F4FA")
+        style_row(ws3, i, len(headers3), fill=fill)
+
+    set_col_widths(ws3, [25, 14, 12, 14, 22, 18])
+
+    # Graphique camembert type
+    pie3 = PieChart()
+    pie3.title = "Répartition par type"
+    data3 = Reference(ws3, min_col=2, min_row=1, max_row=type_grp.shape[0]+1)
+    cats3 = Reference(ws3, min_col=1, min_row=2, max_row=type_grp.shape[0]+1)
+    pie3.add_data(data3, titles_from_data=True)
+    pie3.set_categories(cats3)
+    pie3.width  = 18
+    pie3.height = 12
+    ws3.add_chart(pie3, "H2")
+
+    # =====================================================
+    #  FEUILLE 4 — Resume_Etape
+    # =====================================================
+    ws4 = wb.create_sheet("Resume_Etape")
+    ws4.row_dimensions[1].height = 35
+
+    etape_grp = df_anom.groupby(COL_ETAPE).agg(
+        Nb_Anomalies=("Probléme","count"),
+        Nb_Notifiees=(COL_NOTIF, lambda x: (x=="Oui").sum()),
+        Types_Distincts=("Probléme","nunique")
+    ).reset_index().sort_values("Nb_Anomalies", ascending=False)
+
+    headers4 = ["Étape","Nb Anomalies","% du Total","Nb Notifiées","Taux Notification (%)","Types Distincts"]
+    ws4.append(headers4)
+    style_header(ws4, 1, len(headers4))
+
+    for i, (_, r) in enumerate(etape_grp.iterrows(), 2):
+        pct  = round(r["Nb_Anomalies"] / total_anom * 100, 1)
+        taux = round(r["Nb_Notifiees"] / r["Nb_Anomalies"] * 100, 1)
+        ws4.append([
+            str(r[COL_ETAPE]),
+            int(r["Nb_Anomalies"]),
+            pct,
+            int(r["Nb_Notifiees"]),
+            taux,
+            int(r["Types_Distincts"])
+        ])
+        style_row(ws4, i, len(headers4), fill="F0F4FA" if i % 2 == 0 else None)
+
+    set_col_widths(ws4, [18, 14, 12, 14, 22, 16])
+
+    # Graphique barres étape
+    chart4 = BarChart()
+    chart4.type = "bar"
+    chart4.title = "Anomalies par étape"
+    data4 = Reference(ws4, min_col=2, min_row=1, max_row=etape_grp.shape[0]+1)
+    cats4 = Reference(ws4, min_col=1, min_row=2, max_row=etape_grp.shape[0]+1)
+    chart4.add_data(data4, titles_from_data=True)
+    chart4.set_categories(cats4)
+    chart4.width  = 18
+    chart4.height = 12
+    ws4.add_chart(chart4, "H2")
+
+    # Sauvegarder
+    wb.save(OUTPUT_EXCEL)
+    print(f"  Fichier Excel créé : {OUTPUT_EXCEL}")
+    print(f"  Feuilles : Anomalies_Detail ({len(df_anom)} lignes) | Resume_Mensuel | Resume_Type | Resume_Etape")
+    return OUTPUT_EXCEL'''
+
+content = content.replace(old_block, new_block)
+
+# Remplacer le MAIN
+old_main = '''if __name__ == "__main__":
+    print("\\n" + "="*55)
+    print("  Dashboard Qualité SSSE — Device Login")
+    print("="*55 + "\\n")
+
+    print("[1/5] Authentification Microsoft (Device Login)...")
+    token = get_token()
+
+    print("\\n[2/5] Lecture fichier Excel SharePoint...")
+    df_raw = read_excel(token)
+
+    print("\\n[3/5] Préparation des données SSSE...")
+    df_all, df_anom = prepare_data(df_raw)
+
+    print("\\n[4/5] Génération du dashboard HTML...")
+    payload = serialize(df_all, df_anom)
+    html    = generate_html(payload)
+    print(f"  Taille : {len(html)//1024} Ko")
+
+    print("\\n[5/5] Sauvegarde locale + GitHub Pages...")
+    with open("dashboard_ssse.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    import subprocess
+    subprocess.run(["git", "add", "dashboard_ssse.html"])
+    subprocess.run(["git", "commit", "-m", "Update dashboard SSSE"])
+    subprocess.run(["git", "push"])
+
+    print("\\n" + "="*55)
+    print("  TERMINÉ !")
+    print("="*55)
+    print(f"\\n  Anomalies : {payload[\'total_anomalies\']}")
+    print(f"  Analyses  : {payload[\'total_analyses\']}")
+    print(f"  Généré le : {payload[\'generated_at\']}")
+    print(f"\\n  URL Power Apps → Web viewer :")
+    print(f\'  "https://zaineb-create.github.io/STPA/dashboard_ssse.html"\')
+    print()'''
+
+new_main = '''if __name__ == "__main__":
+    print("\\n" + "="*55)
+    print("  Export Anomalies SSSE → Excel Power BI")
+    print("="*55 + "\\n")
+
+    print("[1/4] Authentification Microsoft (Device Login)...")
+    token = get_token()
+
+    print("\\n[2/4] Lecture fichier Excel SharePoint...")
+    df_raw = read_excel(token)
+
+    print("\\n[3/4] Préparation des données SSSE...")
+    df_all, df_anom = prepare_data(df_raw)
+
+    print("\\n[4/4] Génération du fichier Excel structuré...")
+    path = generate_excel(df_all, df_anom)
+
+    import subprocess
+    subprocess.run(["git", "add", path])
+    subprocess.run(["git", "commit", "-m", f"Update anomalies Excel {datetime.now().strftime(\'%Y-%m-%d %H:%M\')}"])
+    subprocess.run(["git", "push"])
+
+    print("\\n" + "="*55)
+    print("  TERMINÉ !")
+    print("="*55)
+    print(f"\\n  Total analyses  : {len(df_all)}")
+    print(f"  Total anomalies : {len(df_anom)}")
+    print(f"  Généré le       : {datetime.now().strftime(\'%d/%m/%Y %H:%M\')}")
+    print(f"\\n  Fichier : {path}")
+    print(f"\\n  Prochaine étape :")
+    print(f"  1. Télécharge {path} depuis Codespaces")
+    print(f"  2. Ouvre dans Power BI Desktop")
+    print(f"  3. Source → Excel → sélectionne les 4 feuilles")
+    print()'''
+
+content = content.replace(old_main, new_main)
+
+with open("generate_dashboard_devicelogin.py", "w") as f:
+    f.write(content)
+
+print("OK — code modifié avec succès")
