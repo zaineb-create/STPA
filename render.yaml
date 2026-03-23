@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: STPA
+    name: dashboard-ssse
     env: python
-    runtime: python
-    pythonVersion: "3.11.0"
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: python generate_dashboard_devicelogin.py
+    envVars:
+      - key: EXCEL_PATH
+        value: "Documents/Collaboratif -SBOULA-/Contrôle Qualité -CQT-/Controle qualité -SBOULA-/2025 CQ SBOULA/2025 CQ SBOULA FOCQT01_02.xlsx"
