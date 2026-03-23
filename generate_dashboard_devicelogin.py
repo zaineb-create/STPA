@@ -1,11 +1,10 @@
 """
 Dashboard Qualité — Semoule SSSE
 =================================
-SANS admin · SANS permissions Graph API
-Lecture directe via URL SharePoint + token Device Login
-
-Prérequis :
-    pip install msal pandas openpyxl plotly requests python-dotenv jinja2
+CONNEXION : Device Login Microsoft (ton propre compte)
+→ Aucun admin requis
+→ Aucun secret à configurer
+→ Fonctionne avec tout compte Microsoft 365
 """
 
 import io, os, json, webbrowser
@@ -19,9 +18,8 @@ except ImportError:
 
 import requests
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.io as pio
 import msal
+from flask import Flask, Response
 
 # ============================================================
 #  CONFIG
@@ -29,25 +27,17 @@ import msal
 
 SP_SITE      = "roseblanchetn.sharepoint.com"
 SP_SITE_PATH = "/sites/SDAHSESTPA"
-SP_BASE_URL  = "https://roseblanchetn.sharepoint.com"
 
-# UniqueId du fichier Excel (extrait de ton lien SharePoint)
-FILE_UNIQUE_ID = "0761FA65-3D84-4B10-B009-8CA5BF050C98"
-
+EXCEL_PATH   = os.getenv("EXCEL_PATH",
+               "Documents/Collaboratif -SBOULA-/Contrôle Qualité -CQT-/Controle qualité -SBOULA-/2025 CQ SBOULA/2025 CQ SBOULA FOCQT01_02.xlsx")
 SHEET_NAME   = "Semoule SSSE"
 OUTPUT_HTML  = "dashboard_ssse.html"
 
-# Client ID Microsoft Graph Command Line Tools
-CLIENT_ID    = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+CLIENT_ID    = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 AUTHORITY    = "https://login.microsoftonline.com/organizations"
+SCOPES       = ["https://graph.microsoft.com/Sites.Read.All",
+                "https://graph.microsoft.com/Files.ReadWrite.All"]
 
-# Scopes SharePoint directs — pas besoin d'approbation admin
-SCOPES = [
-    f"https://{SP_SITE}/AllSites.Read",
-    f"https://{SP_SITE}/MyFiles.Read"
-]
-
-# Colonnes SSSE
 COL_DATE     = "Date"
 COL_LOT      = "N°lot"
 COL_ETAPE    = "Etape"
@@ -57,66 +47,84 @@ COL_FLUX     = "Flux_Statut"
 COL_ECHANT   = "N° de l'échantillon"
 
 MOIS_FR = {
-    1:"Janvier", 2:"Février", 3:"Mars", 4:"Avril",
-    5:"Mai", 6:"Juin", 7:"Juillet", 8:"Août",
-    9:"Septembre", 10:"Octobre", 11:"Novembre", 12:"Décembre"
+    1:"Janvier",2:"Février",3:"Mars",4:"Avril",5:"Mai",6:"Juin",
+    7:"Juillet",8:"Août",9:"Septembre",10:"Octobre",11:"Novembre",12:"Décembre"
 }
+
+# ============================================================
+#  FLASK APP
+# ============================================================
+
+flask_app = Flask(__name__)
 
 # ============================================================
 #  ETAPE 1 — Authentification Device Login
 # ============================================================
 
 def get_token() -> str:
-    cache      = msal.SerializableTokenCache()
+    cache = msal.SerializableTokenCache()
     cache_file = ".token_cache.json"
 
-    if os.path.exists(cache_file):
-        with open(cache_file) as f:
+    # Charger le cache depuis variable d'environnement (Render)
+    token_cache_env = os.getenv("TOKEN_CACHE")
+    if token_cache_env:
+        cache.deserialize(token_cache_env)
+    elif os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
             cache.deserialize(f.read())
 
-    app = msal.PublicClientApplication(
+    msal_app = msal.PublicClientApplication(
         client_id=CLIENT_ID,
         authority=AUTHORITY,
         token_cache=cache
     )
 
-    # Essayer le cache d'abord
-    accounts = app.get_accounts()
+    # Essayer d'utiliser un token en cache d'abord
+    accounts = msal_app.get_accounts()
     if accounts:
         print(f"  Compte en cache : {accounts[0]['username']}")
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        result = msal_app.acquire_token_silent(SCOPES, account=accounts[0])
         if result and "access_token" in result:
             print("  Token valide trouvé dans le cache")
             _save_cache(cache, cache_file)
             return result["access_token"]
 
-    # Device Login
-    flow = app.initiate_device_flow(scopes=SCOPES)
+    # Sinon, lancer le Device Login
+    flow = msal_app.initiate_device_flow(scopes=SCOPES)
+
     if "user_code" not in flow:
         raise Exception(f"Erreur Device Login : {flow}")
 
     print("\n" + "="*55)
     print("  CONNEXION REQUISE")
     print("="*55)
-    print(f"\n  1. Ouvre : https://microsoft.com/devicelogin")
-    print(f"  2. Entre le code : {flow['user_code']}")
-    print(f"  3. Connecte-toi avec ton compte rose-blanche.com")
-    print(f"\n  En attente...\n")
+    print(f"\n  1. Ouvre cette URL dans ton navigateur :")
+    print(f"     https://microsoft.com/devicelogin")
+    print(f"\n  2. Entre ce code : {flow['user_code']}")
+    print(f"\n  3. Connecte-toi avec ton compte Microsoft entreprise")
+    print(f"\n  En attente de ta connexion...")
+    print("="*55 + "\n")
 
     try:
         webbrowser.open("https://microsoft.com/devicelogin")
     except Exception:
         pass
 
-    result = app.acquire_token_by_device_flow(flow)
+    result = msal_app.acquire_token_by_device_flow(flow)
 
     if "access_token" not in result:
-        raise Exception(
-            f"Connexion échouée : {result.get('error_description', result)}"
-        )
+        raise Exception(f"Connexion échouée : {result.get('error_description', result)}")
 
-    print("  Connecté avec succès !")
+    print(f"  Connecté avec succès !")
     _save_cache(cache, cache_file)
+
+    # Afficher le token cache pour Render
+    print("\n" + "="*55)
+    print("  COPIE CETTE VALEUR DANS RENDER → TOKEN_CACHE")
+    print("="*55)
+    print(cache.serialize())
+    print("="*55 + "\n")
+
     return result["access_token"]
 
 
@@ -127,59 +135,34 @@ def _save_cache(cache, path):
 
 
 # ============================================================
-#  ETAPE 2 — Lecture Excel via URL directe SharePoint
+#  ETAPE 2 — Lecture Excel depuis SharePoint
 # ============================================================
 
 def read_excel(token: str) -> pd.DataFrame:
-    """
-    Lecture via l'UniqueId du fichier — URL SharePoint directe.
-    Utilise le token SharePoint (pas Graph API) → évite le 403.
-    """
-    print(f"  Téléchargement du fichier Excel...")
+    headers = {"Authorization": f"Bearer {token}"}
 
-    download_url = (
-        f"{SP_BASE_URL}/sites/SDAHSESTPA"
-        f"/_layouts/15/download.aspx"
-        f"?UniqueId={FILE_UNIQUE_ID}"
+    site_resp = requests.get(
+        f"https://graph.microsoft.com/v1.0/sites/{SP_SITE}:{SP_SITE_PATH}",
+        headers=headers
     )
+    site_resp.raise_for_status()
+    site_id = site_resp.json()["id"]
+    print(f"  Site ID trouvé : {site_id.split(',')[1]}")
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "*/*",
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    resp = requests.get(
-        download_url,
-        headers=headers,
-        timeout=60,
-        allow_redirects=True
+    file_resp = requests.get(
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{EXCEL_PATH}:/content",
+        headers=headers
     )
+    file_resp.raise_for_status()
 
-    # Vérifier que c'est bien un fichier Excel et non une page HTML
-    if resp.status_code != 200:
-        raise Exception(
-            f"Erreur HTTP {resp.status_code}\n"
-            f"→ Supprime .token_cache.json et relance le script"
-        )
-
-    if b"<!DOCTYPE" in resp.content[:200] or b"<html" in resp.content[:200].lower():
-        raise Exception(
-            "Reçu une page HTML au lieu du fichier Excel.\n"
-            "→ Supprime .token_cache.json et relance le script"
-        )
-
-    df = pd.read_excel(
-        io.BytesIO(resp.content),
-        sheet_name=SHEET_NAME,
-        header=0
-    )
+    df = pd.read_excel(io.BytesIO(file_resp.content),
+                       sheet_name=SHEET_NAME, header=0)
     print(f"  {len(df)} lignes lues — feuille '{SHEET_NAME}'")
     return df
 
 
 # ============================================================
-#  ETAPE 3 — Préparation des données SSSE
+#  ETAPE 3 — Préparation des données
 # ============================================================
 
 def prepare_data(df: pd.DataFrame):
@@ -232,7 +215,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="frame-ancestors *;">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Dashboard Qualité — SSSE</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
@@ -279,6 +262,7 @@ tbody td{padding:8px 12px;color:#c8dff0;vertical-align:middle}
 .p-green{background:#0a2a1a;color:#50c090;border:1px solid #1a4a2a}
 .p-purple{background:#1e0a3a;color:#b070f0;border:1px solid #3a1a6a}
 .p-gray{background:#1a2a3a;color:#8ab0c0;border:1px solid #2a3a4a}
+.error-box{background:#2a0f0f;border:1px solid #5a1e1e;border-radius:10px;padding:20px;color:#f08080;text-align:center;margin:20px 0}
 @media(max-width:600px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -300,14 +284,14 @@ tbody td{padding:8px 12px;color:#c8dff0;vertical-align:middle}
   <span class="filter-info" id="filter-info"></span>
 </div>
 <div class="kpi-row">
-  <div class="kpi c-blue"><div class="lbl">Total analyses</div><div class="val" id="k-total">—</div><div class="sub">Semoule SSSE</div></div>
+  <div class="kpi c-blue"><div class="lbl">Total analyses</div><div class="val" id="k-total">—</div><div class="sub">Feuille Semoule SSSE</div></div>
   <div class="kpi c-red"><div class="lbl">Anomalies</div><div class="val" id="k-anom">—</div><div class="sub" id="k-anom-sub">—</div></div>
   <div class="kpi c-amber"><div class="lbl">Taux anomalies</div><div class="val" id="k-taux">—</div><div class="sub">sur total analyses</div></div>
   <div class="kpi c-green"><div class="lbl">Notifiées (Oui)</div><div class="val" id="k-notif">—</div><div class="sub" id="k-notif-sub">—</div></div>
   <div class="kpi c-purple"><div class="lbl">Problème dominant</div><div class="val" id="k-top" style="font-size:13px;margin-top:6px;line-height:1.4">—</div></div>
 </div>
 <div class="grid">
-  <div class="card"><div class="card-title">Anomalies par type</div><div id="ch-type"></div></div>
+  <div class="card"><div class="card-title">Anomalies par type de problème</div><div id="ch-type"></div></div>
   <div class="card"><div class="card-title">Répartition par étape</div><div id="ch-etape"></div></div>
   <div class="card wide"><div class="card-title">Évolution mensuelle</div><div id="ch-trend"></div></div>
   <div class="card wide">
@@ -346,7 +330,7 @@ function getFiltered(){
 function render(){
   const fd=getFiltered();const n=fd.length;
   const isF=n<ALL_DATA.length;
-  document.getElementById('filter-info').textContent=isF?`Filtre : ${n} / ${ALL_DATA.length}`:'';
+  document.getElementById('filter-info').textContent=isF?`Filtre : ${n} / ${ALL_DATA.length} anomalies`:'';
   document.getElementById('k-total').textContent=TOTAL_ANALYSES.toLocaleString('fr');
   document.getElementById('k-anom').textContent=n.toLocaleString('fr');
   document.getElementById('k-anom-sub').textContent=isF?`(total:${ALL_DATA.length})`:'période complète';
@@ -371,7 +355,7 @@ function render(){
   else{Plotly.newPlot('ch-trend',[{type:'scatter',mode:'lines+markers',x:mLbls,y:mKeys.map(k=>cntM[k]),line:{color:'#2e8adf',width:2,shape:'spline'},marker:{color:'#2e8adf',size:7},fill:'tozeroy',fillcolor:'rgba(46,138,223,0.1)',hovertemplate:'%{x}: <b>%{y}</b><extra></extra>'}],{...LAY,height:220,margin:{l:40,r:20,t:10,b:70},xaxis:{gridcolor:'#1a3a52',tickangle:-45,tickfont:{size:10}},yaxis:{gridcolor:'#1a3a52',tickfont:{size:10}}},CFG);}
   const tbody=document.getElementById('tbl-body');
   const disp=fd.slice(0,100);
-  document.getElementById('tbl-count').textContent=fd.length>100?`(100 sur ${fd.length})`:fd.length>0?`(${fd.length})`:'';;
+  document.getElementById('tbl-count').textContent=fd.length>100?`(100 sur ${fd.length})`:fd.length>0?`(${fd.length})`:'';
   if(!disp.length){tbody.innerHTML='<tr><td colspan="7" class="no-data">Aucune anomalie</td></tr>';return;}
   tbody.innerHTML=disp.map(r=>`<tr>
     <td style="color:#7a9ab8">${r.date}</td><td>${r.lot}</td>
@@ -391,21 +375,79 @@ populateFilters();render();
 
 
 def generate_html(payload: dict) -> str:
-    return DASHBOARD_HTML.replace(
-        "__DATA_JSON__",
-        json.dumps(payload, ensure_ascii=False)
+    return DASHBOARD_HTML.replace("__DATA_JSON__", json.dumps(payload, ensure_ascii=False))
+
+
+# ============================================================
+#  ETAPE 6 — Upload HTML sur SharePoint
+# ============================================================
+
+def upload_html(token: str, html: str) -> str:
+    headers = {"Authorization": f"Bearer {token}"}
+
+    site_resp = requests.get(
+        f"https://graph.microsoft.com/v1.0/sites/{SP_SITE}:{SP_SITE_PATH}",
+        headers=headers
     )
+    site_resp.raise_for_status()
+    site_id = site_resp.json()["id"]
+
+    folder = "/".join(EXCEL_PATH.split("/")[:-1])
+    upload_url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
+        f"/drive/root:/{folder}/{OUTPUT_HTML}:/content"
+    )
+    up = requests.put(
+        upload_url,
+        headers={**headers, "Content-Type": "text/html"},
+        data=html.encode("utf-8")
+    )
+    up.raise_for_status()
+
+    web_url = up.json().get("webUrl", "")
+    print(f"  Uploadé : {web_url}")
+    return web_url
 
 
 # ============================================================
-#  ETAPE 6 — Sauvegarde locale du HTML
+#  ROUTES FLASK
 # ============================================================
 
-def save_html(html: str) -> str:
-    with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"  Fichier créé : {OUTPUT_HTML}")
-    return OUTPUT_HTML
+@flask_app.route("/")
+def dashboard():
+    try:
+        token           = get_token()
+        df_raw          = read_excel(token)
+        df_all, df_anom = prepare_data(df_raw)
+        payload         = serialize(df_all, df_anom)
+        html            = generate_html(payload)
+        return Response(html, mimetype="text/html")
+    except Exception as e:
+        error_html = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8"><title>Erreur</title>
+<style>
+body{{font-family:'Segoe UI',sans-serif;background:#0f1923;color:#e8edf2;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.box{{background:#1a0a0a;border:1px solid #5a1e1e;border-radius:12px;
+      padding:30px 40px;max-width:600px;text-align:center}}
+h2{{color:#f08080;margin-bottom:16px}}
+p{{color:#c8a0a0;font-size:13px;line-height:1.7}}
+code{{background:#2a1010;padding:2px 8px;border-radius:4px;color:#f0a0a0;font-size:12px}}
+</style></head>
+<body><div class="box">
+  <h2>⚠️ Erreur de connexion</h2>
+  <p>{str(e)}</p>
+  <p style="margin-top:16px;font-size:12px;color:#5a3a3a">
+    Lance <code>get_token.py</code> sur ton PC et mets à jour<br>
+    la variable <code>TOKEN_CACHE</code> dans Render → Environment.
+  </p>
+</div></body></html>"""
+        return Response(error_html, mimetype="text/html", status=500)
+
+
+@flask_app.route("/health")
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat()}
 
 
 # ============================================================
@@ -413,37 +455,39 @@ def save_html(html: str) -> str:
 # ============================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*55)
-    print("  Dashboard Qualité SSSE")
-    print("="*55 + "\n")
+    # Mode script local — génère et uploade le HTML
+    import sys
+    if "--serve" in sys.argv:
+        # Mode serveur Flask local
+        port = int(os.environ.get("PORT", 5000))
+        flask_app.run(host="0.0.0.0", port=port, debug=False)
+    else:
+        # Mode script classique
+        print("\n" + "="*55)
+        print("  Dashboard Qualité SSSE — Device Login")
+        print("="*55 + "\n")
 
-    print("[1/5] Authentification Microsoft...")
-    token = get_token()
+        print("[1/5] Authentification Microsoft (Device Login)...")
+        token = get_token()
 
-    print("\n[2/5] Lecture fichier Excel SharePoint...")
-    df_raw = read_excel(token)
+        print("\n[2/5] Lecture fichier Excel SharePoint...")
+        df_raw = read_excel(token)
 
-    print("\n[3/5] Préparation des données SSSE...")
-    df_all, df_anom = prepare_data(df_raw)
+        print("\n[3/5] Préparation des données SSSE...")
+        df_all, df_anom = prepare_data(df_raw)
 
-    print("\n[4/5] Génération du dashboard HTML...")
-    payload = serialize(df_all, df_anom)
-    html    = generate_html(payload)
-    print(f"  Taille : {len(html)//1024} Ko")
+        print("\n[4/5] Génération du dashboard HTML...")
+        payload = serialize(df_all, df_anom)
+        html    = generate_html(payload)
+        print(f"  Taille : {len(html)//1024} Ko")
 
-    print("\n[5/5] Sauvegarde...")
-    path = save_html(html)
+        print("\n[5/5] Upload sur SharePoint...")
+        url = upload_html(token, html)
 
-    print("\n" + "="*55)
-    print("  TERMINÉ !")
-    print("="*55)
-    print(f"\n  Anomalies : {payload['total_anomalies']}")
-    print(f"  Analyses  : {payload['total_analyses']}")
-    print(f"  Généré le : {payload['generated_at']}")
-    print(f"\n  Fichier   : {path}")
-    print(f"\n  Prochaines étapes :")
-    print(f"  1. Télécharge {OUTPUT_HTML} depuis Codespaces")
-    print(f"     (clic droit sur le fichier → Download)")
-    print(f"  2. Dépose-le dans ton dossier SharePoint")
-    print(f"  3. Copie l'URL → Power Apps → Web viewer")
-    print()
+        print("\n" + "="*55)
+        print("  TERMINÉ !")
+        print("="*55)
+        print(f"\n  Anomalies : {payload['total_anomalies']}")
+        print(f"  Analyses  : {payload['total_analyses']}")
+        print(f"  Généré le : {payload['generated_at']}")
+        print(f"\n  URL : {url}")
