@@ -1,0 +1,9 @@
+flask
+gunicorn
+msal
+pandas
+openpyxl
+plotly
+requests
+python-dotenv
+jinja2
